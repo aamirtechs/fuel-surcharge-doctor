@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fuel Surcharge Doctor - AamirTechs</title>
+<style>
+:root{--navy:#0b1f3a;--gold:#d4a72c;--bg:#f6f8fb;--ink:#1c2733;--muted:#5b6b7c;--line:#d9e1ea}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--navy);color:#fff;padding:28px 20px;border-bottom:4px solid var(--gold)}
+header .wrap{max-width:880px;margin:0 auto}
+header h1{margin:0 0 6px;font-size:1.6rem}
+header p{margin:0;color:#c8d4e4}
+main{max-width:880px;margin:24px auto;padding:0 20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(11,31,58,.08)}
+label{display:block;font-weight:600;margin:14px 0 6px}
+.card>label:first-child{margin-top:0}
+textarea{width:100%;min-height:180px;padding:10px;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem}
+input[type=text],input[type=number],select{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:.95rem;width:100%}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:4px}
+.grid label{margin:0 0 6px}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:.95rem;cursor:pointer}
+button.alt{background:#fff;color:var(--navy);border:1px solid var(--navy)}
+button.gold{background:var(--gold);color:#0b1f3a;font-weight:600}
+pre{background:#0b1f3a;color:#eef3f9;border-radius:8px;padding:16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;min-height:60px;font-size:.85rem}
+footer{max-width:880px;margin:0 auto 32px;padding:0 20px;color:var(--muted);font-size:.9rem}
+footer a{color:var(--navy)}
+.hint{color:var(--muted);font-size:.85rem;margin-top:6px;font-weight:400}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>Fuel Surcharge Doctor</h1><p>Compute fuel surcharges for a batch of loads and audit them against what was actually billed, so an underpaid surcharge stops slipping through quietly.</p></div></header>
+<main><div class="card">
+<label for="file">Input JSON file</label>
+<input type="file" id="file" accept=".json,application/json">
+<label for="input">Or paste the JSON input</label>
+<textarea id="input" spellcheck="false" placeholder="Paste a JSON list of loads here, or load the sample."></textarea>
+<label>Contract defaults</label>
+<div class="grid">
+<div><label for="opt-method">Method</label><select id="opt-method"><option value="per_mile" selected>per_mile</option><option value="percent">percent</option></select></div>
+<div><label for="opt-base">Base fuel price ($)</label><input type="text" id="opt-base" value="1.20"></div>
+<div><label for="opt-mpg">Fleet MPG</label><input type="text" id="opt-mpg" value="6.0"></div>
+<div><label for="opt-diesel">Diesel price ($) <span class="hint">blank means per-load</span></label><input type="text" id="opt-diesel" placeholder="per-load"></div>
+<div><label for="opt-percent">Percent (percent method)</label><input type="text" id="opt-percent" placeholder="per-load"></div>
+<div><label for="opt-floor">Floor per mile ($)</label><input type="text" id="opt-floor" value="0"></div>
+<div><label for="opt-tol">Audit tolerance ($)</label><input type="text" id="opt-tol" value="0.01"></div>
+</div>
+<div class="row"><button class="gold" id="run" type="button">Run</button><button class="alt" id="sample" type="button">Load sample</button><button class="alt" id="download" type="button">Download report</button></div>
+<label for="out">Report</label>
+<pre id="out">Your report will appear here.</pre>
+</div></main>
+<footer>
+<p>Built by AamirTechs. <a href="https://aamirtechs.github.io/">All tools</a> | <a href="https://github.com/aamirtechs/fuel-surcharge-doctor">Source</a></p>
+<p>Privacy: this tool runs 100% in your browser, nothing is uploaded.</p>
+</footer>
+<script id="core">
+// Pure logic port of fuel_surcharge_doctor.py. No DOM access in this block.
+// Decimals are {c: BigInt coefficient, e: exponent} with value c * 10^e,
+// mirroring Python Decimal behaviour for the operations used here.
+// runTool options: {base, mpg, diesel, method, percent, floor, tolerance}
+// as strings, matching the CLI flags; empty diesel or percent means unset.
+function Dec(v) {
+  if (v && typeof v === "object" && typeof v.c === "bigint") return v;
+  if (typeof v !== "string" && typeof v !== "number") throw new Error("not a number");
+  var s = String(v).trim();
+  var m = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(s);
+  if (!m) throw new Error("not a number: " + s);
+  var intPart = m[2] || "";
+  var fracPart = (m[3] !== undefined ? m[3] : (m[4] || ""));
+  var exp = (m[5] ? parseInt(m[5], 10) : 0) - fracPart.length;
+  var digits = (intPart + fracPart).replace(/^0+/, "");
+  if (digits === "") return { c: 0n, e: exp };
+  var c = BigInt(digits);
+  if (m[1] === "-") c = -c;
+  return { c: c, e: exp };
+}
+function decStr(d) {
+  if (d.c === 0n) {
+    if (d.e >= 0) return "0" + "0".repeat(d.e);
+    var z = "0.";
+    for (var i = 0; i < -d.e - 1; i++) z += "0";
+    return z + "0";
+  }
+  var neg = d.c < 0n;
+  var digits = (neg ? -d.c : d.c).toString();
+  var out;
+  if (d.e >= 0) out = digits + "0".repeat(d.e);
+  else {
+    var pos = digits.length + d.e;
+    if (pos > 0) out = digits.slice(0, pos) + "." + digits.slice(pos);
+    else out = "0." + "0".repeat(-pos) + digits;
+  }
+  return (neg ? "-" : "") + out;
+}
+function decAdd(a, b) {
+  var e = Math.min(a.e, b.e);
+  var ca = a.c * (10n ** BigInt(a.e - e));
+  var cb = b.c * (10n ** BigInt(b.e - e));
+  return { c: ca + cb, e: e };
+}
+function decSub(a, b) { return decAdd(a, { c: -b.c, e: b.e }); }
+function decMul(a, b) { return { c: a.c * b.c, e: a.e + b.e }; }
+function decCmp(a, b) {
+  var d = decSub(a, b);
+  return d.c < 0n ? -1 : (d.c > 0n ? 1 : 0);
+}
+function decDiv(a, b) {
+  if (b.c === 0n) throw new Error("division by zero");
+  if (a.c === 0n) return { c: 0n, e: 0 };
+  var neg = (a.c < 0n) !== (b.c < 0n);
+  var num = a.c < 0n ? -a.c : a.c;
+  var den = b.c < 0n ? -b.c : b.c;
+  var baseExp = a.e - b.e;
+  var s = 28 - (num.toString().length - den.toString().length);
+  var q = 0n;
+  for (var tries = 0; tries < 5; tries++) {
+    var N, Dd;
+    if (s >= 0) { N = num * (10n ** BigInt(s)); Dd = den; }
+    else { N = num; Dd = den * (10n ** BigInt(-s)); }
+    q = N / Dd;
+    var r = N % Dd;
+    var twice = r * 2n;
+    if (twice > Dd || (twice === Dd && (q & 1n) === 1n)) q += 1n;
+    var dl = q.toString().length;
+    if (dl === 28) break;
+    s += (28 - dl);
+  }
+  var e = baseExp - s;
+  while (q !== 0n && q % 10n === 0n) { q = q / 10n; e += 1; }
+  return { c: neg ? -q : q, e: e };
+}
+function decQuantize2(a) {
+  if (a.e === -2) return { c: a.c, e: -2 };
+  if (a.e > -2) return { c: a.c * (10n ** BigInt(a.e + 2)), e: -2 };
+  var div = 10n ** BigInt(-2 - a.e);
+  var neg = a.c < 0n;
+  var abs = neg ? -a.c : a.c;
+  var q = abs / div;
+  var r = abs % div;
+  if (r * 2n >= div) q += 1n;
+  return { c: neg ? -q : q, e: -2 };
+}
+function moneyStr(a) { return decStr(decQuantize2(a)); }
+function fmtMoney(a) { return "$" + moneyStr(a); }
+function pyRepr(v) {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if (typeof v === "string") {
+    var esc = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    if (v.indexOf("'") >= 0 && v.indexOf('"') < 0) return '"' + esc + '"';
+    return "'" + esc.replace(/'/g, "\\'") + "'";
+  }
+  if (typeof v === "number") return String(v);
+  return JSON.stringify(v);
+}
+function toDecimalFuel(value, field) {
+  if (typeof value === "number" && !isFinite(value)) throw new Error("field " + pyRepr(field) + " must be a finite number");
+  if (typeof value === "string" && /^\s*[+-]?(nan|inf(inity)?)\s*$/i.test(value)) throw new Error("field " + pyRepr(field) + " must be a finite number");
+  try { return Dec(value); }
+  catch (e) { throw new Error("field " + pyRepr(field) + " must be a number, got " + pyRepr(value)); }
+}
+function computeLoad(record, contract) {
+  var label = record.load_id || record.id || "?";
+  if (!("miles" in record)) throw new Error("load " + label + " is missing 'miles'");
+  var miles = toDecimalFuel(record.miles, "miles");
+  if (decCmp(miles, Dec(0)) < 0) throw new Error("load " + label + " has negative miles");
+  var method = ("method" in record ? record.method : contract.method);
+  var diesel = toDecimalFuel(("diesel_price" in record ? record.diesel_price : contract.dieselPrice), "diesel_price");
+  var base = toDecimalFuel(("base_price" in record ? record.base_price : contract.basePrice), "base_price");
+  var result = { loadId: String(label), milesStr: decStr(miles), method: method };
+  var fsc;
+  if (method === "per_mile") {
+    var mpg = toDecimalFuel(("mpg" in record ? record.mpg : contract.mpg), "mpg");
+    if (decCmp(mpg, Dec(0)) <= 0) throw new Error("load " + label + " needs mpg greater than 0");
+    var floor = toDecimalFuel(("floor" in record ? record.floor : contract.floor), "floor");
+    var spread = decSub(diesel, base);
+    var perMile = decCmp(spread, Dec(0)) > 0 ? decDiv(spread, mpg) : Dec(0);
+    if (decCmp(perMile, floor) < 0) perMile = floor;
+    fsc = decQuantize2(decMul(perMile, miles));
+    result.dieselStr = decStr(diesel);
+    result.baseStr = decStr(base);
+    result.mpgStr = decStr(mpg);
+    result.fscPerMileStr = moneyStr(perMile);
+  } else if (method === "percent") {
+    if (!("linehaul" in record)) throw new Error("load " + label + " needs 'linehaul' for percent method");
+    var lh = toDecimalFuel(record.linehaul, "linehaul");
+    if (decCmp(lh, Dec(0)) < 0) throw new Error("load " + label + " has negative linehaul");
+    var percent = toDecimalFuel(("percent" in record ? record.percent : contract.percent), "percent");
+    if (decCmp(percent, Dec(0)) < 0) throw new Error("load " + label + " has negative percent");
+    var raw = decMul(lh, percent);
+    fsc = decQuantize2({ c: raw.c, e: raw.e - 2 });
+    result.dieselStr = decStr(diesel);
+    result.baseStr = decStr(base);
+    result.percentStr = decStr(percent);
+    result.linehaulStrPct = moneyStr(lh);
+  } else {
+    throw new Error("load " + label + " has unknown method " + pyRepr(method));
+  }
+  result.fsc = fsc;
+  result.fscStr = moneyStr(fsc);
+  if ("linehaul" in record) {
+    var linehaul = toDecimalFuel(record.linehaul, "linehaul");
+    result.linehaulStr = moneyStr(linehaul);
+    result.totalDue = decQuantize2(decAdd(linehaul, fsc));
+    result.totalDueStr = moneyStr(result.totalDue);
+  }
+  if ("billed_fsc" in record && record.billed_fsc != null) {
+    var billed = toDecimalFuel(record.billed_fsc, "billed_fsc");
+    result.billedStr = moneyStr(billed);
+    result.difference = decQuantize2(decSub(fsc, billed));
+    result.differenceStr = moneyStr(result.difference);
+    if (decCmp(result.difference, contract.tolerance) > 0) result.audit = "UNDERPAID";
+    else if (decCmp(result.difference, { c: -contract.tolerance.c, e: contract.tolerance.e }) < 0) result.audit = "OVERPAID";
+    else result.audit = "OK";
+  }
+  return result;
+}
+function optStr(v, fallback) {
+  if (v === undefined || v === null || v === "") return fallback;
+  return String(v);
+}
+window.runTool = function (inputText, options) {
+  options = options || {};
+  try {
+    var contract = {
+      method: optStr(options.method, "per_mile"),
+      basePrice: toDecimalFuel(optStr(options.base, "1.20"), "base"),
+      mpg: toDecimalFuel(optStr(options.mpg, "6.0"), "mpg"),
+      floor: toDecimalFuel(optStr(options.floor, "0"), "floor"),
+      tolerance: toDecimalFuel(optStr(options.tolerance, "0.01"), "tolerance"),
+      dieselPrice: (options.diesel === undefined || options.diesel === null || options.diesel === "") ? null : toDecimalFuel(String(options.diesel), "diesel"),
+      percent: (options.percent === undefined || options.percent === null || options.percent === "") ? null : toDecimalFuel(String(options.percent), "percent")
+    };
+    if (decCmp(contract.mpg, Dec(0)) <= 0) throw new Error("mpg must be greater than 0");
+    var data;
+    try { data = JSON.parse(inputText); }
+    catch (e) { throw new Error("invalid JSON: " + e.message); }
+    if (data && typeof data === "object" && !Array.isArray(data)) data = data.loads;
+    if (!Array.isArray(data)) throw new Error("input must be a JSON list or an object with a 'loads' list");
+    data.forEach(function (record, index) {
+      if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("load at index " + index + " is not an object");
+    });
+    var results = [];
+    data.forEach(function (record) {
+      var merged = {};
+      Object.keys(record).forEach(function (k) { merged[k] = record[k]; });
+      if (contract.dieselPrice !== null && !("diesel_price" in merged)) merged.diesel_price = decStr(contract.dieselPrice);
+      if (contract.method === "percent" && contract.percent !== null && !("percent" in merged)) merged.percent = decStr(contract.percent);
+      if (!("diesel_price" in merged)) throw new Error("load " + (merged.load_id || merged.id || "?") + " is missing 'diesel_price' (pass --diesel)");
+      var contractForLoad = {
+        method: contract.method, basePrice: contract.basePrice, mpg: contract.mpg,
+        floor: contract.floor, tolerance: contract.tolerance,
+        dieselPrice: contract.dieselPrice, percent: contract.percent
+      };
+      results.push(computeLoad(merged, contractForLoad));
+    });
+    var totalFsc = Dec(0), totalMiles = Dec(0);
+    results.forEach(function (r) {
+      totalFsc = decAdd(totalFsc, r.fsc);
+      totalMiles = decAdd(totalMiles, Dec(r.milesStr));
+    });
+    var allTotalDue = results.length > 0 && results.every(function (r) { return r.totalDue !== undefined; });
+    var totalDueSum = Dec(0);
+    if (allTotalDue) results.forEach(function (r) { totalDueSum = decAdd(totalDueSum, r.totalDue); });
+    var audited = results.filter(function (r) { return r.audit !== undefined; });
+    var lines = [];
+    results.forEach(function (r) {
+      if (r.method === "per_mile") {
+        lines.push(r.loadId + ": " + r.milesStr + " miles at " + fmtMoney(Dec(r.fscPerMileStr)) +
+          "/mile (diesel " + r.dieselStr + ", base " + r.baseStr + ", " + r.mpgStr + " mpg) -> FSC " + fmtMoney(r.fsc));
+      } else {
+        lines.push(r.loadId + ": " + r.milesStr + " miles, linehaul " + fmtMoney(Dec(r.linehaulStr)) +
+          " at " + r.percentStr + "% -> FSC " + fmtMoney(r.fsc));
+      }
+      if (r.audit !== undefined) {
+        lines.push("    billed " + fmtMoney(Dec(r.billedStr)) + ", difference " + fmtMoney(r.difference) + " (" + r.audit + ")");
+      } else if (r.totalDue !== undefined) {
+        lines.push("    total due (linehaul + FSC): " + fmtMoney(r.totalDue));
+      }
+    });
+    lines.push("");
+    lines.push("Loads: " + results.length + ", miles: " + decStr(totalMiles) + ", total FSC: " + fmtMoney(totalFsc));
+    if (allTotalDue) lines.push("Total due: " + fmtMoney(totalDueSum));
+    if (audited.length) {
+      var under = audited.filter(function (r) { return r.audit === "UNDERPAID"; });
+      var over = audited.filter(function (r) { return r.audit === "OVERPAID"; });
+      var ok = audited.filter(function (r) { return r.audit === "OK"; });
+      var underAmt = Dec(0);
+      under.forEach(function (r) { underAmt = decAdd(underAmt, r.difference); });
+      lines.push("Audited: " + audited.length + ", underpaid: " + under.length + " (" + fmtMoney(underAmt) +
+        "), overpaid: " + over.length + ", ok: " + ok.length);
+    }
+    return lines.join("\n") + "\n";
+  } catch (e) {
+    return "error: " + e.message + "\n";
+  }
+};
+</script>
+<script>
+var SAMPLE = `[
+  {
+    "billed_fsc": 350.0,
+    "diesel_price": 3.9,
+    "linehaul": 2125.0,
+    "load_id": "LD-101",
+    "miles": 850
+  },
+  {
+    "billed_fsc": 200.0,
+    "diesel_price": 3.6,
+    "linehaul": 2000.0,
+    "load_id": "LD-102",
+    "miles": 500
+  },
+  {
+    "billed_fsc": 620.0,
+    "diesel_price": 4.2,
+    "linehaul": 3000.0,
+    "load_id": "LD-103",
+    "miles": 1200
+  }
+]`;
+var inputEl = document.getElementById("input");
+var outEl = document.getElementById("out");
+var lastReport = "";
+document.getElementById("file").addEventListener("change", function (ev) {
+  var f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () { inputEl.value = String(reader.result || ""); };
+  reader.readAsText(f);
+});
+document.getElementById("sample").addEventListener("click", function () {
+  inputEl.value = SAMPLE;
+});
+document.getElementById("run").addEventListener("click", function () {
+  var options = {
+    method: document.getElementById("opt-method").value,
+    base: document.getElementById("opt-base").value,
+    mpg: document.getElementById("opt-mpg").value,
+    diesel: document.getElementById("opt-diesel").value,
+    percent: document.getElementById("opt-percent").value,
+    floor: document.getElementById("opt-floor").value,
+    tolerance: document.getElementById("opt-tol").value
+  };
+  try {
+    lastReport = window.runTool(inputEl.value, options);
+    outEl.textContent = lastReport;
+  } catch (e) {
+    lastReport = "error: " + e.message + "\n";
+    outEl.textContent = lastReport;
+  }
+});
+document.getElementById("download").addEventListener("click", function () {
+  var text = lastReport || outEl.textContent;
+  var blob = new Blob([text], { type: "text/plain" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "fuel-surcharge-report.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>

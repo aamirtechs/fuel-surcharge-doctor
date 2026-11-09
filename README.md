@@ -1,4 +1,5 @@
 # fuel-surcharge-doctor
+**Live tool:** https://aamirtechs.github.io/fuel-surcharge-doctor/ (runs in your browser, no install)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/aamirtechs/fuel-surcharge-doctor/blob/main/LICENSE) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/aamirtechs/fuel-surcharge-doctor/issues)
 

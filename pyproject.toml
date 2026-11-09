@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fuel-surcharge-doctor"
+version = "1.0.0"
+description = "Compute and audit fuel surcharges for a batch of loads"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+[tool.setuptools]
+py-modules = ["fuel_surcharge_doctor"]
